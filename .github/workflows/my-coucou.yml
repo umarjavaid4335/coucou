@@ -1,0 +1,147 @@
+name: My Coucou
+
+# Builds this fork's own Windows release: upstream's newest code merged into the
+# customizations (the `windows-mac-parity` branch, and the fork-only updater on
+# `my-coucou`), tested, packed and published as `windows-v<upstream>.<build>`.
+# The installed app looks at this fork's releases and offers "Update now".
+#
+# A merge that conflicts, or tests that fail, publish nothing: an issue says
+# what needs a hand, and the app stays on the build it has.
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even when nothing changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: my-coucou
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  BRANCH: my-coucou
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: my-coucou
+          fetch-depth: 0
+
+      - name: Merge upstream and the customizations
+        id: merge
+        shell: pwsh
+        run: |
+          git config user.name "My Coucou"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Louis-CFM/coucou.git
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin windows-mac-parity
+          git fetch --force --tags origin
+          $failed = @()
+          foreach ($ref in "origin/windows-mac-parity", "upstream/main") {
+            git merge --no-edit $ref
+            if ($LASTEXITCODE -ne 0) {
+              $files = (git diff --name-only --diff-filter=U) -join "`n- "
+              git merge --abort
+              $failed += "**$ref** conflicts in:`n- $files"
+            }
+          }
+          if ($failed) {
+            "conflict=true" >> $env:GITHUB_OUTPUT
+            $body = "The automatic update could not merge on its own:`n`n" + ($failed -join "`n`n") +
+              "`n`nNothing was published; the installed app stays on its build. Resolve the merge on ``my-coucou`` (or ask Claude to), then run this workflow again."
+            $open = gh issue list --state open --search "in:title My Coucou update needs a hand" --json number --jq ".[0].number"
+            if ($open) { gh issue comment $open --body $body } else { gh issue create --title "My Coucou update needs a hand" --body $body }
+            exit 1
+          }
+          $released = git tag --points-at HEAD | Where-Object { $_ -like "windows-v*" }
+          if ($released -and "${{ inputs.force }}" -ne "true") {
+            "Already released as $released"
+            "skip=true" >> $env:GITHUB_OUTPUT
+          }
+
+      - uses: actions/setup-node@v4
+        if: steps.merge.outputs.conflict != 'true' && steps.merge.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+
+      - name: Cache cargo
+        if: steps.merge.outputs.conflict != 'true' && steps.merge.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            windows/target
+          key: my-coucou-cargo-${{ hashFiles('windows/Cargo.lock') }}
+          restore-keys: my-coucou-cargo-
+
+      - name: Test
+        id: test
+        if: steps.merge.outputs.conflict != 'true' && steps.merge.outputs.skip != 'true'
+        working-directory: windows
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit 1 }
+          npx tsc --noEmit
+          if ($LASTEXITCODE) { exit 1 }
+          npm test
+          if ($LASTEXITCODE) { exit 1 }
+          cargo test --release -p coucou-hook
+          if ($LASTEXITCODE) { exit 1 }
+          cargo test --release --lib -p coucou
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Build and pack
+        id: pack
+        if: steps.merge.outputs.conflict != 'true' && steps.merge.outputs.skip != 'true'
+        working-directory: windows
+        shell: pwsh
+        env:
+          COUCOU_BUILD: ${{ github.run_number }}
+        run: |
+          npm run pack
+          if ($LASTEXITCODE) { exit 1 }
+          $upstream = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $v = "$upstream.${{ github.run_number }}"
+          Move-Item "release/Coucou-Windows-$upstream-setup.exe" "release/Coucou-Windows-$v-setup.exe"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "upstream=$upstream" >> $env:GITHUB_OUTPUT
+
+      - name: Publish
+        if: steps.pack.outputs.version != ''
+        working-directory: windows
+        shell: pwsh
+        run: |
+          git push origin "HEAD:$env:BRANCH"
+          if ($LASTEXITCODE) { exit 1 }
+          $v = "${{ steps.pack.outputs.version }}"
+          $u = "${{ steps.pack.outputs.upstream }}"
+          $sha = git rev-parse HEAD
+          $notes = "## What's new`n- **Coucou $u with your customizations**`n`nUpstream: https://github.com/Louis-CFM/coucou/releases`n`nBuilt from ``$sha``."
+          gh release create "windows-v$v" "release/Coucou-Windows-$v-setup.exe" --target $sha --title "My Coucou $v" --notes $notes
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Say what broke
+        if: failure() && steps.merge.outputs.conflict != 'true'
+        shell: pwsh
+        run: |
+          $body = "The automatic update merged but did not pass: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`n`nNothing was published; the installed app stays on its build."
+          $open = gh issue list --state open --search "in:title My Coucou update needs a hand" --json number --jq ".[0].number"
+          if ($open) { gh issue comment $open --body $body } else { gh issue create --title "My Coucou update needs a hand" --body $body }

@@ -29,9 +29,13 @@ use tauri::{AppHandle, Emitter};
 use crate::i18n::t;
 use crate::island::WINDOW_LABEL;
 
-pub const RELEASES_URL: &str = "https://api.github.com/repos/Louis-CFM/coucou/releases?per_page=30";
+/// This fork's own releases, not upstream's: upstream's installer would put the
+/// plain app over this build and take its customizations with it. The fork's
+/// "My Coucou" workflow merges each upstream release into the customizations,
+/// tests and builds it, and publishes it here as `windows-v<upstream>.<build>`.
+pub const RELEASES_URL: &str = "https://api.github.com/repos/umarjavaid4335/coucou/releases?per_page=30";
 /// Where "What's new" goes when no release is known.
-pub const RELEASES_PAGE: &str = "https://github.com/Louis-CFM/coucou/releases";
+pub const RELEASES_PAGE: &str = "https://github.com/umarjavaid4335/coucou/releases";
 
 /// This platform's release tags: `windows-vX.Y.Z` / `linux-vX.Y.Z`. Never the
 /// rolling `windows-latest` / `linux-latest`, nor the Mac's `v…` or Android's.
@@ -219,6 +223,12 @@ pub fn install_kind(exe: &str, has_uninstaller: bool, local_app_data: Option<&st
     if program_files.iter().filter(|p| !p.trim().is_empty()).any(|p| dir == format!("{}\\coucou", win_path(p))) {
         return InstallKind::Msi;
     }
+    // The setup.exe installed into a folder of the user's choosing (D:\Coucou):
+    // a folder named Coucou with NSIS's uninstaller in it. Its /UPDATE goes back
+    // to the folder it recorded.
+    if has_uninstaller && dir.contains('\\') && dir.rsplit('\\').next() == Some("coucou") {
+        return InstallKind::Setup;
+    }
     InstallKind::Manual
 }
 
@@ -359,8 +369,20 @@ fn state() -> MutexGuard<'static, Inner> {
     .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Upstream's version, plus the fork's build number when the release workflow
+/// built it (`COUCOU_BUILD`): 0.5.9.3. A local build is plain 0.5.9, so the
+/// first fork release of that version is newer than it.
 pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| with_build(env!("CARGO_PKG_VERSION"), option_env!("COUCOU_BUILD")))
+}
+
+/// "0.5.9" and build "3" → "0.5.9.3"; no build (or not a number) → "0.5.9".
+pub fn with_build(version: &str, build: Option<&str>) -> String {
+    match build.map(str::trim) {
+        Some(b) if !b.is_empty() && b.len() <= 9 && b.bytes().all(|c| c.is_ascii_digit()) => format!("{version}.{b}"),
+        _ => version.to_string(),
+    }
 }
 
 fn now() -> i64 {
@@ -938,8 +960,22 @@ mod tests {
         assert_eq!(kind(r"C:\Program Files\Coucou\bin\coucou.exe", false), InstallKind::Manual);
         assert_eq!(kind(r"C:\Users\Ana\AppData\Local\Coucou\bin\coucou-hook.exe", true), InstallKind::Manual);
         assert_eq!(kind("coucou.exe", true), InstallKind::Manual);
+        // The setup.exe installed into a folder of the user's choosing.
+        assert_eq!(kind(r"D:\Coucou\coucou.exe", true), InstallKind::Setup);
+        assert_eq!(kind(r"D:\Coucou\coucou.exe", false), InstallKind::Manual);
         assert_eq!(install_kind(r"C:\Program Files\Coucou\coucou.exe", false, None, &[]), InstallKind::Manual);
         assert_eq!(install_kind("/opt/Coucou/coucou", false, Some(""), &[String::new()]), InstallKind::Manual);
+    }
+
+    #[test]
+    fn the_fork_build_number_follows_upstreams_version() {
+        assert_eq!(with_build("0.5.9", Some("3")), "0.5.9.3");
+        assert_eq!(with_build("0.5.9", None), "0.5.9");
+        assert_eq!(with_build("0.5.9", Some("")), "0.5.9");
+        assert_eq!(with_build("0.5.9", Some("x1")), "0.5.9");
+        assert!(is_newer("0.5.9.1", "0.5.9"));
+        assert!(is_newer("0.6.0.1", "0.5.9.7"));
+        assert_eq!(version_from_tag("windows-v0.5.9.3", "windows-v").as_deref(), Some("0.5.9.3"));
     }
 
     #[test]

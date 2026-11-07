@@ -5,8 +5,8 @@ name: My Coucou
 # `my-coucou`), tested, packed and published as `windows-v<upstream>.<build>`.
 # The installed app looks at this fork's releases and offers "Update now".
 #
-# A merge that conflicts, or tests that fail, publish nothing: an issue says
-# what needs a hand, and the app stays on the build it has.
+# A merge that conflicts, or tests that fail, publish nothing: the run fails (GitHub emails
+# about it) with a note on its summary page, and the app stays on its build.
 
 on:
   schedule:
@@ -20,7 +20,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 concurrency:
   group: my-coucou
@@ -63,8 +62,7 @@ jobs:
             "conflict=true" >> $env:GITHUB_OUTPUT
             $body = "The automatic update could not merge on its own:`n`n" + ($failed -join "`n`n") +
               "`n`nNothing was published; the installed app stays on its build. Resolve the merge on ``my-coucou`` (or ask Claude to), then run this workflow again."
-            $open = gh issue list --state open --search "in:title My Coucou update needs a hand" --json number --jq ".[0].number"
-            if ($open) { gh issue comment $open --body $body } else { gh issue create --title "My Coucou update needs a hand" --body $body }
+            $body >> $env:GITHUB_STEP_SUMMARY
             exit 1
           }
           $released = git tag --points-at HEAD | Where-Object { $_ -like "windows-v*" }
@@ -105,6 +103,9 @@ jobs:
           if ($LASTEXITCODE) { exit 1 }
           cargo test --release -p coucou-hook
           if ($LASTEXITCODE) { exit 1 }
+          # The app bundles coucou-hook.exe: its build script wants the file there.
+          cargo build --release -p coucou-hook
+          if ($LASTEXITCODE) { exit 1 }
           cargo test --release --lib -p coucou
           if ($LASTEXITCODE) { exit 1 }
 
@@ -142,6 +143,4 @@ jobs:
         if: failure() && steps.merge.outputs.conflict != 'true'
         shell: pwsh
         run: |
-          $body = "The automatic update merged but did not pass: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`n`nNothing was published; the installed app stays on its build."
-          $open = gh issue list --state open --search "in:title My Coucou update needs a hand" --json number --jq ".[0].number"
-          if ($open) { gh issue comment $open --body $body } else { gh issue create --title "My Coucou update needs a hand" --body $body }
+          "The automatic update merged but did not pass its tests or build; see the failed step above. Nothing was published; the installed app stays on its build." >> $env:GITHUB_STEP_SUMMARY

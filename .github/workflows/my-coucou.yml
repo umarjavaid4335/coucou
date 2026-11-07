@@ -136,7 +136,8 @@ jobs:
           $u = "${{ steps.pack.outputs.upstream }}"
           $sha = git rev-parse HEAD
           $notes = "## What's new`n- **Coucou $u with your customizations**`n`nUpstream: https://github.com/Louis-CFM/coucou/releases`n`nBuilt from ``$sha``."
-          gh release create "windows-v$v" "release/Coucou-Windows-$v-setup.exe" --target $sha --title "My Coucou $v" --notes $notes
+          # Named outright: with upstream as a remote too, gh would pick the parent repository.
+          gh release create "windows-v$v" "release/Coucou-Windows-$v-setup.exe" --repo "${{ github.repository }}" --target $sha --title "My Coucou $v" --notes $notes
           if ($LASTEXITCODE) { exit 1 }
 
       - name: Say what broke
